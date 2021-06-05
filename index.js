@@ -3,53 +3,86 @@ const { URLSearchParams } = require('url');
 const request = require('simple-get');
 
 const API_EP_MESSAGES = 'https://api.pushover.net/1/messages.json';
-const NO_POST = true; /** for testing */
+const NO_POST = process.env['PO_SIMULATE']; // For local integration testing
+
+const targetError = (target, msg) => {
+	const err = new Error(msg);
+	err.target = target;
+
+	return err;
+}
+
+// "private" methods
+const postToApi = Symbol();
+const generateUrl = Symbol();
 
 class Bloblob {
 	/**
-	 * @param {string} [appToken] your application token
+	 * @param {string} [appToken] your Pushover.net application token
 	 */
 	constructor(appToken) {
 		if (typeof appToken === 'string') this.appToken = appToken;
 	}
 
-	async lob(userToken, message, title) {
+	/**
+	 * Transmit a message to a single user token, along with an optional
+	 * title.
+	 * @param {string} userToken
+	 * @param {string} message
+	 * @param {string} [title]
+	 * @param {string} [device]
+	 * @returns {Promise<string>}
+	 */
+	async lob(userToken, message, title, device) {
 		if (! this.appToken) throw new Error('No application token!');
 		if (! userToken) throw new Error('No user token provided!');
 		if (! message) throw new Error('No message!');
 
-		return await this.postToApi(userToken, message, title);
+		return this[postToApi](userToken, message, title, device);
 	}
 
+	/**
+	 * Helper function to transmit a message to a list of user tokens, 
+	 * along with an optional title. Does not provide a `device` specification, 
+	 * use `.lob()` if you need that level of precision.
+	 * Will resolve with a mixed array of either message ID strings for successes,
+	 * or `Error` objects for any that went wrong. These error objects will have 
+	 * a `.target` property to associate them with the specific message attempt.
+	 * @param {string} userToken
+	 * @param {string} message
+	 * @param {string} [title]
+	 * @returns {Promise<any[]>}
+	 */
 	async lobToAll(userTokens, message, title) {
 		const pms = [];
 
 		for (let user of userTokens) {
-			pms.push(this.postToApi(user, message, title))
+			pms.push(this[postToApi](user, message, title))
 		}
 
-		/** @todo handle sporadic error conditions */
 		return allPromisesSettled(pms);
 	}
 
 	/**
-	 *
 	 * @param {string} target
 	 * @param {string} message
-	 * @param {string} title
+	 * @param {string} [title]
+	 * @param {string} [device]
 	 * @returns {Promise<string>}
 	 */
-	postToApi(target, message, title) {
+	[postToApi](target, message, title, device) {
+		const _error = targetError.bind(null, target);
+
 		return new Promise((resolve, reject) => {
-			if (message.length > 1024) return reject(new Error('Message is too long'));
-			const url = this.generatePostURL(target, message, title);
+			if (message.length > 1024) return reject(_error('Message is too long'));
+			const url = this[generateUrl](target, message, title, device);
 
 			if (NO_POST) {
-				// just fake it
+				// just fake it with some delay
 				console.log(`[.] Was going to POST to -> ${url}`);
 				setTimeout(() => {
-					resolve('01234567-3218-41af-83d8-fedcba987654');
-				}, 400);
+					resolve('01234567-8888-9999-0000-deadbeefcafe');
+				}, Math.random()*1000);
 
 				return;
 			}
@@ -65,14 +98,14 @@ class Bloblob {
 
 				if (res.statusCode !== 200) {
 					const json = JSON.parse(strData);
-					return reject(new Error(`HTTP ${res.statusCode}: ${json.errors.join(' ')}`))
+					return reject(_error(`HTTP ${res.statusCode}: ${json.errors.join(' ')}`))
 				}
 
 				try {
 					const json = JSON.parse(strData);
 					resolve(json.request);
 				} catch(err) {
-					return reject(new Error('Response malformed?'));
+					return reject(_error(`Response from pushover.net is malformed? ${strData}`));
 				}
 			})
 		})
@@ -83,16 +116,18 @@ class Bloblob {
 	 * @param {string} userToken
 	 * @param {string} message
 	 * @param {string} [title]
+	 * @param {string} [device]
 	 * @return {string}
 	 */
-	generatePostURL(userToken, message, title) {
+	[generateUrl](userToken, message, title, device) {
 		const params = {
 			token: this.appToken,
 			user: userToken,
 			message,
 		};
 
-		if (typeof title === 'string') params.title = title;
+		if (typeof title === 'string' && title.length > 0) params.title = title;
+		if (typeof device === 'string' && title.length > 0) params.device = device;
 
 		const str_params = (new URLSearchParams(
 			Object.keys(params).map(k => [ k, params[k] ])
@@ -104,11 +139,13 @@ class Bloblob {
 
 module.exports = Bloblob;
 
-/** @testing */
+/** Quick n' easy "integration test" */
 if (require.main === module) {
+	let hasCustomMessage = true;
+
 	if (process.stdin.isTTY) {
-		console.error('[!] No message content: Pipe your message to this module via STDIN');
-		process.exit(1);
+		console.error('[?] No custom message content: Pipe your message in via STDIN');
+		hasCustomMessage = false;
 	}
 
 	const APP_TOKEN = process.env['PO_APP_TOKEN'];
@@ -123,28 +160,46 @@ if (require.main === module) {
 	}
 
 	let msg = '';
-	process.stdin.on('data', (chunk) => {
-		msg += chunk;
-	});
+	if (hasCustomMessage) {
+		// siphon in message text
+		process.stdin.on('data', (chunk) => {
+			msg += chunk;
+		});
+	}
 
-	process.stdin.on('end', () => {
+	const execute = () => {
 		const bb = new Bloblob(APP_TOKEN);
-		bb.lobToAll(USER_TOKENS, 'Hey from BlobLob! 🚀')
-			.then(console.log, console.error)
+		const payloadString = `Hey from BlobLob! 🚀:\n${msg || '<no message>'}`;
+		if (USER_TOKENS.length === 1) {
+			bb.lob(USER_TOKENS[0], payloadString, 'Welcome', 'iphone')
+				.then(console.log, console.error)
+		} else {
+			bb.lobToAll(USER_TOKENS, payloadString)
+				.then(console.log, console.error)
+		}
+	};
 
-	});
+	if (hasCustomMessage) process.stdin.on('end', execute);
+	else execute();
 }
 
+/**
+ * Shim version of `.allSettled`
+ * @param {Promise[]} promiseList 
+ * @returns {Promise<any>[]}
+ */
 function allPromisesSettled(promiseList) {
 	let results = new Array(promiseList.length);
 
-	return new Promise((ok, rej) => {
+	return new Promise((ok) => {
 		let fillAndCheck = function(i) {
 			return function(ret) {
 				results[i] = ret;
+
 				for(let j = 0; j < results.length; j++) {
 					if (results[j] == null) return;
 				}
+
 				ok(results);
 			}
 		};

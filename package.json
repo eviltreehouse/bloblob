@@ -1,7 +1,7 @@
 {
   "name": "bloblob",
-  "version": "0.1.0",
-  "description": "Lightweight Pushover.net client",
+  "version": "0.2.1",
+  "description": "Blob Lob: a lightweight Pushover.net client for direct messages",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -11,5 +11,8 @@
   "license": "MIT",
   "dependencies": {
     "simple-get": "^4.0.0"
+  },
+  "engines": {
+    "node": ">= 10"
   }
 }
